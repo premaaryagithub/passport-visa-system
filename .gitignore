@@ -25,5 +25,6 @@ frontend/.env
 
 #ppt and  doc file s
 *.ppt
+*.pptx
 *.docx
 *.pdf
