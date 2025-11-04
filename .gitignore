@@ -1,0 +1,29 @@
+node_modules
+.env
+coverage
+coverage.json
+typechain
+typechain-types
+
+# Hardhat files
+cache
+artifacts
+
+# Frontend
+frontend/node_modules
+frontend/build
+frontend/.env
+
+# OS
+.DS_Store
+
+#md files 
+*.md
+
+#txt file s
+*.txt
+
+#ppt and  doc file s
+*.ppt
+*.docx
+*.pdf
