@@ -25,6 +25,6 @@ frontend/.env
 
 #ppt and  doc file s
 *.ppt
-*.pptx
+Seminar_Presentation Template.pptx
 *.docx
 *.pdf
