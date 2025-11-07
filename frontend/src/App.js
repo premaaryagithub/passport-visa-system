@@ -1,6 +1,22 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AlertCircle, CheckCircle, Wallet, FileText, Globe, Users, LogOut, ArrowLeft, Check, X } from 'lucide-react';
 import './App.css';
+import { connectWallet as connectWeb3Wallet, getBalance, getCurrentNetwork } from './utils/web3';
+import {
+  applyForPassport,
+  getPassportByHolder,
+  getPassportDetails,
+  issuePassport,
+  revokePassport as revokePassportContract,
+  applyForVisa,
+  getVisasByApplicant,
+  getVisaDetails,
+  approveVisa as approveVisaContract,
+  rejectVisa as rejectVisaContract,
+  isAuthorizedPassportOfficer,
+  isAuthorizedVisaOfficer,
+  VisaType
+} from './utils/contractInteractions';
 
 // Web3 Integration Component
 const PassportVisaSystem = () => {
@@ -12,6 +28,8 @@ const PassportVisaSystem = () => {
   const [visaApplications, setVisaApplications] = useState([]);
   const [loading, setLoading] = useState(false);
   const [notification, setNotification] = useState({ show: false, type: '', message: '' });
+  const [balance, setBalance] = useState('0');
+  const [network, setNetwork] = useState(null);
   
   // Real-time data for officer dashboards (starts empty)
   const [allPassportApplications, setAllPassportApplications] = useState([]);
@@ -31,21 +49,78 @@ const PassportVisaSystem = () => {
     visaType: '0'
   });
 
-  // Connect Wallet
+  // Officer dashboard states
+  const [passportIdLookup, setPassportIdLookup] = useState('');
+  const [visaIdLookup, setVisaIdLookup] = useState('');
+  const [lookedUpPassport, setLookedUpPassport] = useState(null);
+  const [lookedUpVisa, setLookedUpVisa] = useState(null);
+  const [isOfficer, setIsOfficer] = useState(false);
+
+  // Connect Wallet - uses cached provider to prevent repeated eth_requestAccounts
   const connectWallet = async () => {
     if (typeof window.ethereum !== 'undefined') {
       try {
-        const accounts = await window.ethereum.request({ 
-          method: 'eth_requestAccounts' 
-        });
-        setAccount(accounts[0]);
+        const address = await connectWeb3Wallet();
+        setAccount(address);
         setIsConnected(true);
+        
+        // Check if this account is an officer (Account #0 from Hardhat)
+        // Account #0 address: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+        const officerAddress = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+        setIsOfficer(address.toLowerCase() === officerAddress.toLowerCase());
+        
         showNotification('success', 'Wallet connected successfully!');
+        
+        // Load user's passport and visa data
+        await loadUserData(address);
       } catch (error) {
         showNotification('error', 'Failed to connect wallet: ' + error.message);
       }
     } else {
       showNotification('error', 'Please install MetaMask!');
+    }
+  };
+  
+  // Load user data from blockchain
+  const loadUserData = async (address) => {
+    try {
+      setLoading(true);
+      
+      // Load passport data (returns null if user has no passport)
+      const passport = await getPassportByHolder(address);
+      if (passport) {
+        setPassportData({
+          ...passport,
+          appliedDate: passport.issueDate > 0 
+            ? new Date(passport.issueDate * 1000).toLocaleDateString()
+            : 'Pending'
+        });
+      } else {
+        setPassportData(null); // No passport yet
+      }
+      
+      // Load visa applications (returns empty array if user has no visas)
+      const visas = await getVisasByApplicant(address);
+      if (visas && visas.length > 0) {
+        setVisaApplications(visas.map(visa => ({
+          id: visa.visaId,
+          destinationCountry: visa.destinationCountry,
+          visaType: visa.visaType,
+          visaTypeName: visa.visaTypeString,
+          status: visa.statusString,
+          appliedDate: new Date(visa.applicationDate * 1000).toLocaleDateString()
+        })));
+      } else {
+        setVisaApplications([]); // No visas yet
+      }
+      
+    } catch (error) {
+      // Silently handle errors - user likely has no data yet
+      console.log('Loading user data (new user or no applications yet)');
+      setPassportData(null);
+      setVisaApplications([]);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -66,37 +141,24 @@ const PassportVisaSystem = () => {
     setTimeout(() => setNotification({ show: false, type: '', message: '' }), 5000);
   };
 
-  // Handle passport form submission
+  // Handle passport form submission - BLOCKCHAIN INTEGRATED
   const handlePassportSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
     
     try {
-      // Simulating blockchain transaction
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      const result = await applyForPassport(
+        passportForm.fullName,
+        passportForm.dateOfBirth,
+        passportForm.nationality,
+        passportForm.passportNumber,
+        passportForm.ipfsHash
+      );
       
-      const newPassportData = {
-        ...passportForm,
-        status: 'Pending',
-        appliedDate: new Date().toLocaleDateString()
-      };
+      showNotification('success', `Passport application submitted! ID: ${result.passportId}`);
       
-      // Add to citizen's passport view
-      setPassportData(newPassportData);
-      
-      // Add to officer dashboard (so it appears in Passport Officer Dashboard)
-      const officerPassportRecord = {
-        id: Date.now(),
-        fullName: passportForm.fullName,
-        passportNumber: passportForm.passportNumber,
-        nationality: passportForm.nationality,
-        dateOfBirth: passportForm.dateOfBirth,
-        status: 'Pending',
-        appliedDate: new Date().toLocaleDateString()
-      };
-      setAllPassportApplications([...allPassportApplications, officerPassportRecord]);
-      
-      showNotification('success', 'Passport application submitted successfully!');
+      // Reload user data to get updated passport
+      await loadUserData(account);
       
       // Reset form
       setPassportForm({
@@ -107,17 +169,17 @@ const PassportVisaSystem = () => {
         ipfsHash: ''
       });
     } catch (error) {
-      showNotification('error', 'Failed to submit application');
+      showNotification('error', 'Failed to submit application: ' + (error.reason || error.message));
     } finally {
       setLoading(false);
     }
   };
 
-  // Handle visa form submission
+  // Handle visa form submission - BLOCKCHAIN INTEGRATED
   const handleVisaSubmit = async (e) => {
     e.preventDefault();
     
-    if (!passportData || passportData.status !== 'Active') {
+    if (!passportData || passportData.statusString !== 'Active') {
       showNotification('error', 'You need an active passport to apply for visa');
       return;
     }
@@ -125,104 +187,129 @@ const PassportVisaSystem = () => {
     setLoading(true);
     
     try {
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      const result = await applyForVisa(
+        passportData.passportId,
+        visaForm.destinationCountry,
+        parseInt(visaForm.visaType)
+      );
       
-      const newVisa = {
-        id: Date.now(),
-        ...visaForm,
-        status: 'Pending',
-        appliedDate: new Date().toLocaleDateString(),
-        visaTypeName: ['Tourist', 'Business', 'Student', 'Work', 'Transit'][visaForm.visaType]
-      };
+      showNotification('success', `Visa application submitted! ID: ${result.visaId}`);
       
-      // Add to citizen's visa view
-      setVisaApplications([...visaApplications, newVisa]);
-      
-      // Add to officer dashboard (so it appears in Visa Officer Dashboard)
-      const officerVisaRecord = {
-        id: Date.now(),
-        applicantName: passportData.fullName,
-        passportNumber: passportData.passportNumber,
-        destinationCountry: visaForm.destinationCountry,
-        visaType: ['Tourist', 'Business', 'Student', 'Work', 'Transit'][visaForm.visaType],
-        status: 'Pending',
-        appliedDate: new Date().toLocaleDateString()
-      };
-      setAllVisaApplications([...allVisaApplications, officerVisaRecord]);
-      
-      showNotification('success', 'Visa application submitted successfully!');
+      // Reload user data to get updated visas
+      await loadUserData(account);
       
       setVisaForm({
         destinationCountry: '',
         visaType: '0'
       });
     } catch (error) {
-      showNotification('error', 'Failed to submit visa application');
+      showNotification('error', 'Failed to submit visa application: ' + (error.reason || error.message));
     } finally {
       setLoading(false);
     }
   };
 
-  // Approve Passport
-  const approvePassport = (id) => {
-    // Update in officer dashboard
-    setAllPassportApplications(allPassportApplications.map(app => 
-      app.id === id ? { ...app, status: 'Active' } : app
-    ));
-    
-    // Also update citizen's passport view if it matches
-    const approvedApp = allPassportApplications.find(app => app.id === id);
-    if (passportData && approvedApp && passportData.passportNumber === approvedApp.passportNumber) {
-      setPassportData({ ...passportData, status: 'Active' });
+  // Approve Passport - BLOCKCHAIN INTEGRATED
+  const approvePassport = async (passportId) => {
+    setLoading(true);
+    try {
+      await issuePassport(passportId, 10); // 10 years validity
+      showNotification('success', 'Passport approved successfully!');
+      // Reload data if needed
+    } catch (error) {
+      showNotification('error', 'Failed to approve passport: ' + (error.reason || error.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Reject Passport - BLOCKCHAIN INTEGRATED
+  const rejectPassport = async (passportId) => {
+    setLoading(true);
+    try {
+      await revokePassportContract(passportId, 'Application rejected by officer');
+      showNotification('success', 'Passport rejected!');
+    } catch (error) {
+      showNotification('error', 'Failed to reject passport: ' + (error.reason || error.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Approve Visa - BLOCKCHAIN INTEGRATED
+  const approveVisa = async (visaId) => {
+    setLoading(true);
+    try {
+      await approveVisaContract(visaId, 6); // 6 months validity
+      showNotification('success', 'Visa approved successfully!');
+    } catch (error) {
+      showNotification('error', 'Failed to approve visa: ' + (error.reason || error.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Reject Visa - BLOCKCHAIN INTEGRATED
+  const rejectVisa = async (visaId) => {
+    setLoading(true);
+    try {
+      await rejectVisaContract(visaId, 'Application rejected by officer');
+      showNotification('success', 'Visa rejected!');
+    } catch (error) {
+      showNotification('error', 'Failed to reject visa: ' + (error.reason || error.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Lookup Passport by ID - FOR OFFICERS
+  const lookupPassport = async () => {
+    if (!passportIdLookup || passportIdLookup.trim() === '') {
+      showNotification('error', 'Please enter a Passport ID');
+      return;
     }
     
-    showNotification('success', 'Passport approved successfully!');
+    setLoading(true);
+    try {
+      const passport = await getPassportDetails(parseInt(passportIdLookup));
+      if (passport) {
+        setLookedUpPassport(passport);
+        showNotification('success', 'Passport found!');
+      } else {
+        setLookedUpPassport(null);
+        showNotification('error', 'Passport not found');
+      }
+    } catch (error) {
+      setLookedUpPassport(null);
+      showNotification('error', 'Error looking up passport: ' + (error.reason || error.message));
+    } finally {
+      setLoading(false);
+    }
   };
 
-  // Reject Passport
-  const rejectPassport = (id) => {
-    // Update in officer dashboard
-    setAllPassportApplications(allPassportApplications.map(app => 
-      app.id === id ? { ...app, status: 'Rejected' } : app
-    ));
-    
-    // Also update citizen's passport view if it matches
-    const rejectedApp = allPassportApplications.find(app => app.id === id);
-    if (passportData && rejectedApp && passportData.passportNumber === rejectedApp.passportNumber) {
-      setPassportData({ ...passportData, status: 'Rejected' });
+  // Lookup Visa by ID - FOR OFFICERS
+  const lookupVisa = async () => {
+    if (!visaIdLookup || visaIdLookup.trim() === '') {
+      showNotification('error', 'Please enter a Visa ID');
+      return;
     }
     
-    showNotification('success', 'Passport rejected!');
-  };
-
-  // Approve Visa
-  const approveVisa = (id) => {
-    // Update in officer dashboard
-    setAllVisaApplications(allVisaApplications.map(app => 
-      app.id === id ? { ...app, status: 'Approved' } : app
-    ));
-    
-    // Also update citizen's visa view if it matches
-    setVisaApplications(visaApplications.map(visa => 
-      visa.id === id ? { ...visa, status: 'Approved' } : visa
-    ));
-    
-    showNotification('success', 'Visa approved successfully!');
-  };
-
-  // Reject Visa
-  const rejectVisa = (id) => {
-    // Update in officer dashboard
-    setAllVisaApplications(allVisaApplications.map(app => 
-      app.id === id ? { ...app, status: 'Rejected' } : app
-    ));
-    
-    // Also update citizen's visa view if it matches
-    setVisaApplications(visaApplications.map(visa => 
-      visa.id === id ? { ...visa, status: 'Rejected' } : visa
-    ));
-    
-    showNotification('success', 'Visa rejected!');
+    setLoading(true);
+    try {
+      const visa = await getVisaDetails(parseInt(visaIdLookup));
+      if (visa) {
+        setLookedUpVisa(visa);
+        showNotification('success', 'Visa found!');
+      } else {
+        setLookedUpVisa(null);
+        showNotification('error', 'Visa not found');
+      }
+    } catch (error) {
+      setLookedUpVisa(null);
+      showNotification('error', 'Error looking up visa: ' + (error.reason || error.message));
+    } finally {
+      setLoading(false);
+    }
   };
 
   // Status badge component
@@ -252,7 +339,12 @@ const PassportVisaSystem = () => {
               <Globe className="h-8 w-8 text-indigo-600" />
               <div>
                 <h1 className="text-2xl font-bold text-gray-900">Passport-Visa Blockchain System</h1>
-                <p className="text-sm text-gray-600">Sepolia Testnet</p>
+                <p className="text-sm text-gray-600">
+                  {network ? `${network.name} (Chain ID: ${network.chainId})` : 'Hardhat Local'}
+                  {network && network.chainId !== 31337 && (
+                    <span className="text-red-600 font-semibold ml-2">⚠️ Wrong Network!</span>
+                  )}
+                </p>
               </div>
             </div>
             
@@ -266,6 +358,12 @@ const PassportVisaSystem = () => {
               </button>
             ) : (
               <div className="flex items-center space-x-4">
+                <div className="bg-blue-100 text-blue-800 px-4 py-2 rounded-lg">
+                  <div className="text-xs font-semibold">Balance</div>
+                  <div className="text-sm font-bold">
+                    {parseFloat(balance).toFixed(4)} ETH
+                  </div>
+                </div>
                 <div className="bg-green-100 text-green-800 px-4 py-2 rounded-lg flex items-center space-x-2">
                   <CheckCircle className="h-5 w-5" />
                   <span className="text-sm font-medium">
@@ -305,20 +403,24 @@ const PassportVisaSystem = () => {
       {/* Main Content */}
       {isConnected ? (
         <main className="max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
-          {/* Role Selector */}
-          <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-            <label className="block text-sm font-medium text-gray-700 mb-2">Select Role</label>
-            <select
-              value={userRole}
-              onChange={(e) => setUserRole(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-            >
-              <option value="citizen">Citizen</option>
-              <option value="passport-officer">Passport Officer</option>
-              <option value="visa-officer">Visa Officer</option>
-              <option value="border-control">Border Control</option>
-            </select>
-          </div>
+          {/* Role Selector - Only visible for Officer Account */}
+          {isOfficer && (
+            <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Select Role (Officer Account Only)
+              </label>
+              <select
+                value={userRole}
+                onChange={(e) => setUserRole(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              >
+                <option value="citizen">Citizen</option>
+                <option value="passport-officer">Passport Officer</option>
+                <option value="visa-officer">Visa Officer</option>
+                <option value="border-control">Border Control</option>
+              </select>
+            </div>
+          )}
 
           {userRole === 'citizen' && (
             <>
@@ -431,7 +533,7 @@ const PassportVisaSystem = () => {
                       <div className="space-y-4">
                         <div className="border-b pb-3">
                           <p className="text-sm text-gray-600">Status</p>
-                          <StatusBadge status={passportData.status} />
+                          <StatusBadge status={passportData.statusString} />
                         </div>
                         <div className="border-b pb-3">
                           <p className="text-sm text-gray-600">Full Name</p>
@@ -450,7 +552,7 @@ const PassportVisaSystem = () => {
                           <p className="font-medium">{passportData.dateOfBirth}</p>
                         </div>
                         <div>
-                          <p className="text-sm text-gray-600">Applied Date</p>
+                          <p className="text-sm text-gray-600">Applied/Issue Date</p>
                           <p className="font-medium">{passportData.appliedDate}</p>
                         </div>
                       </div>
@@ -557,64 +659,95 @@ const PassportVisaSystem = () => {
                 </button>
               </div>
               
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold text-gray-700">Pending Passport Applications</h3>
-                {allPassportApplications.filter(app => app.status === 'Pending').length > 0 ? (
-                  allPassportApplications.filter(app => app.status === 'Pending').map(app => (
-                    <div key={app.id} className="border rounded-lg p-4 hover:shadow-md transition-shadow">
-                      <div className="flex justify-between items-start">
-                        <div className="flex-1">
-                          <h4 className="font-semibold text-lg mb-2">{app.fullName}</h4>
-                          <div className="grid grid-cols-2 gap-2 text-sm text-gray-600">
-                            <p><span className="font-medium">Passport #:</span> {app.passportNumber}</p>
-                            <p><span className="font-medium">Nationality:</span> {app.nationality}</p>
-                            <p><span className="font-medium">Applied:</span> {app.appliedDate}</p>
-                            <p><StatusBadge status={app.status} /></p>
-                          </div>
-                        </div>
-                        <div className="flex space-x-2 ml-4">
-                          <button
-                            onClick={() => approvePassport(app.id)}
-                            className="flex items-center space-x-1 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors"
-                            title="Approve"
-                          >
-                            <Check className="h-4 w-4" />
-                            <span>Approve</span>
-                          </button>
-                          <button
-                            onClick={() => rejectPassport(app.id)}
-                            className="flex items-center space-x-1 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors"
-                            title="Reject"
-                          >
-                            <X className="h-4 w-4" />
-                            <span>Reject</span>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="text-center py-8 text-gray-500">
-                    <FileText className="h-12 w-12 mx-auto mb-2 text-gray-300" />
-                    <p>No pending applications</p>
-                  </div>
-                )}
-
-                <h3 className="text-lg font-semibold text-gray-700 mt-8">All Passport Records</h3>
-                <div className="space-y-3">
-                  {allPassportApplications.map(app => (
-                    <div key={app.id} className="border rounded-lg p-3 bg-gray-50">
-                      <div className="flex justify-between items-center">
-                        <div>
-                          <p className="font-medium">{app.fullName}</p>
-                          <p className="text-sm text-gray-600">{app.passportNumber} • {app.nationality}</p>
-                        </div>
-                        <StatusBadge status={app.status} />
-                      </div>
-                    </div>
-                  ))}
+              {/* Lookup Passport by ID */}
+              <div className="mb-6">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">Lookup Passport Application</h3>
+                <div className="flex space-x-4">
+                  <input
+                    type="number"
+                    placeholder="Enter Passport ID (e.g., 1)"
+                    value={passportIdLookup}
+                    onChange={(e) => setPassportIdLookup(e.target.value)}
+                    className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  />
+                  <button
+                    onClick={lookupPassport}
+                    disabled={loading}
+                    className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 transition-colors"
+                  >
+                    {loading ? 'Searching...' : 'Lookup'}
+                  </button>
                 </div>
               </div>
+
+              {/* Display Looked Up Passport */}
+              {lookedUpPassport && (
+                <div className="border rounded-lg p-6 bg-gray-50">
+                  <div className="flex justify-between items-start mb-4">
+                    <div>
+                      <h4 className="text-xl font-bold text-gray-900">{lookedUpPassport.fullName}</h4>
+                      <p className="text-sm text-gray-600">Passport ID: {lookedUpPassport.passportId}</p>
+                    </div>
+                    <StatusBadge status={lookedUpPassport.statusString} />
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-4 mb-4">
+                    <div>
+                      <p className="text-sm text-gray-600">Date of Birth</p>
+                      <p className="font-medium">{lookedUpPassport.dateOfBirth}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Nationality</p>
+                      <p className="font-medium">{lookedUpPassport.nationality}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Passport Number</p>
+                      <p className="font-medium">{lookedUpPassport.passportNumber}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Holder Address</p>
+                      <p className="font-medium text-xs">{lookedUpPassport.holder.substring(0, 10)}...</p>
+                    </div>
+                  </div>
+
+                  {lookedUpPassport.statusString === 'Pending' && (
+                    <div className="flex space-x-4 mt-4">
+                      <button
+                        onClick={() => approvePassport(lookedUpPassport.passportId)}
+                        disabled={loading}
+                        className="flex-1 flex items-center justify-center space-x-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 disabled:bg-gray-400 transition-colors"
+                      >
+                        <Check className="h-5 w-5" />
+                        <span>Approve</span>
+                      </button>
+                      <button
+                        onClick={() => rejectPassport(lookedUpPassport.passportId)}
+                        disabled={loading}
+                        className="flex-1 flex items-center justify-center space-x-2 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 disabled:bg-gray-400 transition-colors"
+                      >
+                        <X className="h-5 w-5" />
+                        <span>Reject</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!lookedUpPassport && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 text-center">
+                  <FileText className="h-16 w-16 mx-auto text-blue-600 mb-4" />
+                  <h3 className="text-lg font-semibold text-blue-900 mb-2">How to Use</h3>
+                  <p className="text-sm text-blue-700 mb-2">
+                    1. Get the Passport ID from the citizen's notification (shown after they apply)
+                  </p>
+                  <p className="text-sm text-blue-700 mb-2">
+                    2. Enter the Passport ID in the field above and click "Lookup"
+                  </p>
+                  <p className="text-sm text-blue-700">
+                    3. Review the application and click "Approve" or "Reject"
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -635,65 +768,97 @@ const PassportVisaSystem = () => {
                 </button>
               </div>
               
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold text-gray-700">Pending Visa Applications</h3>
-                {allVisaApplications.filter(app => app.status === 'Pending').length > 0 ? (
-                  allVisaApplications.filter(app => app.status === 'Pending').map(app => (
-                    <div key={app.id} className="border rounded-lg p-4 hover:shadow-md transition-shadow">
-                      <div className="flex justify-between items-start">
-                        <div className="flex-1">
-                          <h4 className="font-semibold text-lg mb-2">{app.applicantName}</h4>
-                          <div className="grid grid-cols-2 gap-2 text-sm text-gray-600">
-                            <p><span className="font-medium">Passport #:</span> {app.passportNumber}</p>
-                            <p><span className="font-medium">Destination:</span> {app.destinationCountry}</p>
-                            <p><span className="font-medium">Type:</span> {app.visaType}</p>
-                            <p><span className="font-medium">Applied:</span> {app.appliedDate}</p>
-                            <p><StatusBadge status={app.status} /></p>
-                          </div>
-                        </div>
-                        <div className="flex space-x-2 ml-4">
-                          <button
-                            onClick={() => approveVisa(app.id)}
-                            className="flex items-center space-x-1 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors"
-                            title="Approve"
-                          >
-                            <Check className="h-4 w-4" />
-                            <span>Approve</span>
-                          </button>
-                          <button
-                            onClick={() => rejectVisa(app.id)}
-                            className="flex items-center space-x-1 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors"
-                            title="Reject"
-                          >
-                            <X className="h-4 w-4" />
-                            <span>Reject</span>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="text-center py-8 text-gray-500">
-                    <Globe className="h-12 w-12 mx-auto mb-2 text-gray-300" />
-                    <p>No pending visa applications</p>
-                  </div>
-                )}
-
-                <h3 className="text-lg font-semibold text-gray-700 mt-8">All Visa Records</h3>
-                <div className="space-y-3">
-                  {allVisaApplications.map(app => (
-                    <div key={app.id} className="border rounded-lg p-3 bg-gray-50">
-                      <div className="flex justify-between items-center">
-                        <div>
-                          <p className="font-medium">{app.applicantName} → {app.destinationCountry}</p>
-                          <p className="text-sm text-gray-600">{app.visaType} Visa • {app.passportNumber}</p>
-                        </div>
-                        <StatusBadge status={app.status} />
-                      </div>
-                    </div>
-                  ))}
+              {/* Lookup Visa by ID */}
+              <div className="mb-6">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">Lookup Visa Application</h3>
+                <div className="flex space-x-4">
+                  <input
+                    type="number"
+                    placeholder="Enter Visa ID (e.g., 1)"
+                    value={visaIdLookup}
+                    onChange={(e) => setVisaIdLookup(e.target.value)}
+                    className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  />
+                  <button
+                    onClick={lookupVisa}
+                    disabled={loading}
+                    className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 transition-colors"
+                  >
+                    {loading ? 'Searching...' : 'Lookup'}
+                  </button>
                 </div>
               </div>
+
+              {/* Display Looked Up Visa */}
+              {lookedUpVisa && (
+                <div className="border rounded-lg p-6 bg-gray-50">
+                  <div className="flex justify-between items-start mb-4">
+                    <div>
+                      <h4 className="text-xl font-bold text-gray-900">{lookedUpVisa.destinationCountry}</h4>
+                      <p className="text-sm text-gray-600">Visa ID: {lookedUpVisa.visaId}</p>
+                    </div>
+                    <StatusBadge status={lookedUpVisa.statusString} />
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-4 mb-4">
+                    <div>
+                      <p className="text-sm text-gray-600">Visa Type</p>
+                      <p className="font-medium">{lookedUpVisa.visaTypeString}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Passport ID</p>
+                      <p className="font-medium">{lookedUpVisa.passportId}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Applicant Address</p>
+                      <p className="font-medium text-xs">{lookedUpVisa.applicant.substring(0, 10)}...</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Application Date</p>
+                      <p className="font-medium text-xs">
+                        {new Date(lookedUpVisa.applicationDate * 1000).toLocaleDateString()}
+                      </p>
+                    </div>
+                  </div>
+
+                  {lookedUpVisa.statusString === 'Pending' && (
+                    <div className="flex space-x-4 mt-4">
+                      <button
+                        onClick={() => approveVisa(lookedUpVisa.visaId)}
+                        disabled={loading}
+                        className="flex-1 flex items-center justify-center space-x-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 disabled:bg-gray-400 transition-colors"
+                      >
+                        <Check className="h-5 w-5" />
+                        <span>Approve</span>
+                      </button>
+                      <button
+                        onClick={() => rejectVisa(lookedUpVisa.visaId)}
+                        disabled={loading}
+                        className="flex-1 flex items-center justify-center space-x-2 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 disabled:bg-gray-400 transition-colors"
+                      >
+                        <X className="h-5 w-5" />
+                        <span>Reject</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!lookedUpVisa && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 text-center">
+                  <Globe className="h-16 w-16 mx-auto text-blue-600 mb-4" />
+                  <h3 className="text-lg font-semibold text-blue-900 mb-2">How to Use</h3>
+                  <p className="text-sm text-blue-700 mb-2">
+                    1. Get the Visa ID from the citizen's notification (shown after they apply)
+                  </p>
+                  <p className="text-sm text-blue-700 mb-2">
+                    2. Enter the Visa ID in the field above and click "Lookup"
+                  </p>
+                  <p className="text-sm text-blue-700">
+                    3. Review the application and click "Approve" or "Reject"
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -714,87 +879,16 @@ const PassportVisaSystem = () => {
                 </button>
               </div>
               
-              <div className="space-y-6">
-                <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4">
-                  <h3 className="text-lg font-semibold text-indigo-900 mb-2">Document Verification</h3>
-                  <p className="text-sm text-indigo-700">Verify passports and visas at border checkpoints</p>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="border rounded-lg p-4">
-                    <h4 className="font-semibold mb-3 flex items-center">
-                      <FileText className="h-5 w-5 mr-2 text-indigo-600" />
-                      Active Passports
-                    </h4>
-                    <div className="space-y-2">
-                      {allPassportApplications.filter(app => app.status === 'Active').map(app => (
-                        <div key={app.id} className="bg-green-50 border border-green-200 rounded p-2">
-                          <div className="flex justify-between items-center">
-                            <div>
-                              <p className="font-medium text-sm">{app.fullName}</p>
-                              <p className="text-xs text-gray-600">{app.passportNumber}</p>
-                            </div>
-                            <div className="flex items-center space-x-1 text-green-700">
-                              <CheckCircle className="h-4 w-4" />
-                              <span className="text-xs">Valid</span>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                      {allPassportApplications.filter(app => app.status === 'Active').length === 0 && (
-                        <p className="text-sm text-gray-500 text-center py-4">No active passports</p>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="border rounded-lg p-4">
-                    <h4 className="font-semibold mb-3 flex items-center">
-                      <Globe className="h-5 w-5 mr-2 text-indigo-600" />
-                      Approved Visas
-                    </h4>
-                    <div className="space-y-2">
-                      {allVisaApplications.filter(app => app.status === 'Approved').map(app => (
-                        <div key={app.id} className="bg-green-50 border border-green-200 rounded p-2">
-                          <div className="flex justify-between items-center">
-                            <div>
-                              <p className="font-medium text-sm">{app.applicantName}</p>
-                              <p className="text-xs text-gray-600">{app.destinationCountry} • {app.visaType}</p>
-                            </div>
-                            <div className="flex items-center space-x-1 text-green-700">
-                              <CheckCircle className="h-4 w-4" />
-                              <span className="text-xs">Valid</span>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                      {allVisaApplications.filter(app => app.status === 'Approved').length === 0 && (
-                        <p className="text-sm text-gray-500 text-center py-4">No approved visas</p>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="border-t pt-4">
-                  <h4 className="font-semibold mb-3">Quick Statistics</h4>
-                  <div className="grid grid-cols-3 gap-4">
-                    <div className="bg-blue-50 rounded-lg p-4 text-center">
-                      <p className="text-2xl font-bold text-blue-600">{allPassportApplications.length}</p>
-                      <p className="text-sm text-gray-600">Total Passports</p>
-                    </div>
-                    <div className="bg-green-50 rounded-lg p-4 text-center">
-                      <p className="text-2xl font-bold text-green-600">
-                        {allPassportApplications.filter(app => app.status === 'Active').length}
-                      </p>
-                      <p className="text-sm text-gray-600">Active Passports</p>
-                    </div>
-                    <div className="bg-purple-50 rounded-lg p-4 text-center">
-                      <p className="text-2xl font-bold text-purple-600">
-                        {allVisaApplications.filter(app => app.status === 'Approved').length}
-                      </p>
-                      <p className="text-sm text-gray-600">Approved Visas</p>
-                    </div>
-                  </div>
-                </div>
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 text-center">
+                <Users className="h-16 w-16 mx-auto text-blue-600 mb-4" />
+                <h3 className="text-lg font-semibold text-blue-900 mb-2">Border Control Dashboard</h3>
+                <p className="text-sm text-blue-700 mb-4">
+                  Verify passports and visas using their IDs from the blockchain.
+                </p>
+                <p className="text-xs text-blue-600">
+                  Note: Full dashboard with all records requires event indexing (The Graph) or backend service.
+                  For now, use Passport/Visa IDs to verify documents directly via smart contract calls.
+                </p>
               </div>
             </div>
           )}

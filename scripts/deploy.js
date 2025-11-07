@@ -26,10 +26,10 @@ async function main() {
   const visaAddress = await visaManagement.getAddress();
   console.log("VisaManagement deployed to:", visaAddress);
 
-  // Wait for block confirmations
+  // Wait for block confirmations (reduced for local network)
   console.log("\nWaiting for block confirmations...");
-  await passportRegistry.deploymentTransaction().wait(5);
-  await visaManagement.deploymentTransaction().wait(5);
+  await passportRegistry.deploymentTransaction().wait(1);
+  await visaManagement.deploymentTransaction().wait(1);
 
   // Verify contracts on Etherscan (if API key is provided)
   if (process.env.ETHERSCAN_API_KEY) {
